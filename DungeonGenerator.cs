@@ -1,636 +1,860 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Tilemaps;
-using System.Collections.Generic;
 
 public class DungeonGenerator : MonoBehaviour
 {
-    public Tilemap tilemap;
-    public TileBase floorTile;
+    [Header("Tilemap")] public Tilemap tilemap;
+
+    [Header("Tiles")] public TileBase floorTile;
     public TileBase wallTile;
+    public TileBase spawnTile;
     public TileBase exitTile;
     public TileBase rockTile;
-    public int width = 20;
-    public int height = 20;
-    public int minRoomSize = 4;
-    public int maxRoomSize = 8;
-    public int roomCount = 6;
-    public int corridorWidth = 2;
-    [Range(0, 100)]
-    public int rockDensity = 5;  // Reduced from 10 to 5
+    public TileBase chestTile;
 
-    private int[,] map;
+    [Header("Generation Settings")] [Range(3, 5)]
+    public int roomCount = 3;
+
+    public int roomSize = 10;
+    [Range(1, 4)] public int deadEndCount = 2;
+    [Range(3, 7)] public int rockCount = 3;
+    [Range(0, 3)] public int chestCount = 1;
+
+    // Debug visualization
+    public bool showDeadEnds = true;
+    public Color deadEndColor = Color.red;
+
+    // Internal representation of the dungeon
+    private enum CellType
+    {
+        Empty,
+        Floor,
+        Wall,
+        Spawn,
+        Exit,
+        Rock,
+        Chest,
+        DeadEnd
+    }
+
+    private CellType[,] dungeonGrid;
+    private int dungeonWidth;
+    private int dungeonHeight;
+    private Vector2Int spawnPosition;
+    private Vector2Int exitPosition;
     private List<Rect> rooms = new List<Rect>();
-    private HashSet<Vector2Int> rockPositions = new HashSet<Vector2Int>();
+    private List<Vector2Int> corridors = new List<Vector2Int>();
+    private List<List<Vector2Int>> deadEnds = new List<List<Vector2Int>>();
 
     void Start()
     {
         GenerateDungeon();
     }
-    void GenerateDungeon()
-    {
-        map = new int[width, height];
-        rooms.Clear();
-        rockPositions.Clear();
 
-        // Try to place rooms (more attempts to get more rooms)
-        int attempts = 0;
-        int maxAttempts = roomCount * 5; // Increased attempts for better room placement
-        
-        while (rooms.Count < roomCount && attempts < maxAttempts)
-        {
-            attempts++;
-            
-            // Generate random room dimensions and position
-            int roomWidth = Random.Range(minRoomSize, maxRoomSize + 1);
-            int roomHeight = Random.Range(minRoomSize, maxRoomSize + 1);
-            int roomX = Random.Range(1, width - roomWidth - 1);
-            int roomY = Random.Range(1, height - roomHeight - 1);
-            
-            Rect newRoom = new Rect(roomX, roomY, roomWidth, roomHeight);
-            
-            // Check if this room overlaps with any other rooms
-            bool overlaps = false;
-            foreach (Rect room in rooms)
-            {
-                if (RoomsOverlap(room, newRoom, 1))  // 1 tile spacing between rooms
-                {
-                    overlaps = true;
-                    break;
-                }
-            }
-            
-            if (!overlaps)
-            {
-                // Add the room
-                rooms.Add(newRoom);
-                
-                // Create the room (set floor tiles)
-                for (int x = roomX; x < roomX + roomWidth; x++)
-                {
-                    for (int y = roomY; y < roomY + roomHeight; y++)
-                    {
-                        map[x, y] = 1; // Floor
-                    }
-                }
-            }
-        }
+    public void GenerateDungeon()
+    {
+        // Clear existing tilemap
+        tilemap.ClearAllTiles();
+
+        // Reset containers
+        rooms.Clear();
+        corridors.Clear();
+        deadEnds.Clear();
+
+        // Determine dungeon size based on room count and size
+        dungeonWidth = roomCount * (roomSize + 10);
+        dungeonHeight = roomCount * (roomSize + 10);
+
+        // Initialize dungeon grid
+        dungeonGrid = new CellType[dungeonWidth, dungeonHeight];
+
+        // Generate rooms
+        GenerateRooms();
 
         // Connect rooms with corridors
-        ConnectAllRooms();
-        
-        // Add some additional random corridors for more exploration paths
-        AddExtraCorridors();
+        ConnectRooms();
 
-        // Make a secondary pass to widen corridors a bit
-        WidenCorridors();
-        
-        // Place exit in a valid floor tile at the "end" of the dungeon
-        PlaceExitAtEnd();
-        
-        // Place rocks on the floor
+        // Add dead ends
+        AddDeadEnds();
+
+        // Place spawn and exit
+        PlaceSpawnAndExit();
+
+        // Place obstacles and rewards
         PlaceRocks();
+        PlaceChests();
 
-        // Render the map
-        RenderMap();
+        // Create walls around floors
+        CreateWalls();
+
+        // Ensure all floor tiles have wall borders where needed
+        EnsureWallBorders();
+
+        // Render the dungeon
+        RenderDungeon();
+
+        // Debug visualization
+        if (showDeadEnds)
+        {
+            VisualizeDeadEnds();
+        }
     }
 
-    bool RoomsOverlap(Rect a, Rect b, int spacing)
+    private void GenerateRooms()
     {
-        return (a.x - spacing < b.x + b.width + spacing && 
-                a.x + a.width + spacing > b.x - spacing &&
-                a.y - spacing < b.y + b.height + spacing && 
-                a.y + a.height + spacing > b.y - spacing);
+        int actualRoomCount = Random.Range(3, roomCount + 1);
+
+        for (int i = 0; i < actualRoomCount; i++)
+        {
+            bool roomPlaced = false;
+            int attempts = 0;
+
+            while (!roomPlaced && attempts < 50)
+            {
+                // Random room width and height around roomSize
+                int roomWidth = Random.Range(roomSize - 2, roomSize + 2);
+                int roomHeight = Random.Range(roomSize - 2, roomSize + 2);
+
+                // Random position, with safety margin from edge
+                int roomX = Random.Range(5, dungeonWidth - roomWidth - 5);
+                int roomY = Random.Range(5, dungeonHeight - roomHeight - 5);
+
+                Rect newRoom = new Rect(roomX, roomY, roomWidth, roomHeight);
+
+                // Check if room overlaps with existing rooms
+                bool overlaps = false;
+                foreach (Rect room in rooms)
+                {
+                    // Add padding around rooms
+                    Rect paddedRoom = new Rect(
+                        room.x - 3, room.y - 3,
+                        room.width + 6, room.height + 6
+                    );
+
+                    if (newRoom.Overlaps(paddedRoom))
+                    {
+                        overlaps = true;
+                        break;
+                    }
+                }
+
+                if (!overlaps)
+                {
+                    // Place room
+                    rooms.Add(newRoom);
+
+                    // Fill room with floor tiles
+                    for (int x = (int)newRoom.x; x < (int)(newRoom.x + newRoom.width); x++)
+                    {
+                        for (int y = (int)newRoom.y; y < (int)(newRoom.y + newRoom.height); y++)
+                        {
+                            dungeonGrid[x, y] = CellType.Floor;
+                        }
+                    }
+
+                    roomPlaced = true;
+                }
+
+                attempts++;
+            }
+        }
     }
 
-    void ConnectAllRooms()
+    private void ConnectRooms()
     {
-        // Create a minimum spanning tree of corridors to connect all rooms
-        if (rooms.Count <= 1) return;
-        
-        // Simple approach: connect each room to the next one in the list
         for (int i = 0; i < rooms.Count - 1; i++)
         {
-            Vector2 start = GetRoomCenter(rooms[i]);
-            Vector2 end = GetRoomCenter(rooms[i + 1]);
-            CreateCorridor(start, end);
-        }
-        
-        // Make a few more connections to create loops
-        int extraConnections = rooms.Count / 2 + 1; // Increase extra connections
-        for (int i = 0; i < extraConnections; i++)
-        {
-            int roomA = Random.Range(0, rooms.Count);
-            int roomB = Random.Range(0, rooms.Count);
-            
-            // Avoid connecting a room to itself
-            if (roomA != roomB)
-            {
-                Vector2 start = GetRoomCenter(rooms[roomA]);
-                Vector2 end = GetRoomCenter(rooms[roomB]);
-                CreateCorridor(start, end);
-            }
-        }
-    }
+            // Find center points of rooms
+            Vector2Int currentRoom = new Vector2Int(
+                (int)(rooms[i].x + rooms[i].width / 2),
+                (int)(rooms[i].y + rooms[i].height / 2)
+            );
 
-    Vector2 GetRoomCenter(Rect room)
-    {
-        return new Vector2(room.x + room.width / 2, room.y + room.height / 2);
-    }
+            Vector2Int nextRoom = new Vector2Int(
+                (int)(rooms[i + 1].x + rooms[i + 1].width / 2),
+                (int)(rooms[i + 1].y + rooms[i + 1].height / 2)
+            );
 
-    void CreateCorridor(Vector2 start, Vector2 end)
-    {
-        int x = Mathf.RoundToInt(start.x);
-        int y = Mathf.RoundToInt(start.y);
-        int targetX = Mathf.RoundToInt(end.x);
-        int targetY = Mathf.RoundToInt(end.y);
-
-        // Choose whether to go horizontal first or vertical first
-        bool horizontalFirst = Random.value < 0.5f;
-
-        if (horizontalFirst)
-        {
-            // Go horizontal first
-            while (x != targetX)
+            // Randomly decide whether to go horizontal or vertical first
+            if (Random.value < 0.5f)
             {
-                x += (targetX > x) ? 1 : -1;
-                CreateWiderCorridor(x, y);
-            }
-            
-            // Then go vertical
-            while (y != targetY)
-            {
-                y += (targetY > y) ? 1 : -1;
-                CreateWiderCorridor(x, y);
-            }
-        }
-        else
-        {
-            // Go vertical first
-            while (y != targetY)
-            {
-                y += (targetY > y) ? 1 : -1;
-                CreateWiderCorridor(x, y);
-            }
-            
-            // Then go horizontal
-            while (x != targetX)
-            {
-                x += (targetX > x) ? 1 : -1;
-                CreateWiderCorridor(x, y);
-            }
-        }
-    }
-
-    void CreateWiderCorridor(int x, int y)
-    {
-        // Create a corridor of specified width
-        for (int dx = 0; dx < corridorWidth; dx++)
-        {
-            for (int dy = 0; dy < corridorWidth; dy++)
-            {
-                int nx = x + dx - corridorWidth/2;
-                int ny = y + dy - corridorWidth/2;
-                
-                if (nx >= 0 && nx < width && ny >= 0 && ny < height)
-                {
-                    map[nx, ny] = 1; // Floor
-                }
-            }
-        }
-    }
-
-    void WidenCorridors()
-    {
-        // Make a copy of the map to reference while we modify
-        int[,] mapCopy = new int[width, height];
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                mapCopy[x, y] = map[x, y];
-            }
-        }
-        
-        // Look for narrow corridors and widen them
-        for (int x = 1; x < width - 1; x++)
-        {
-            for (int y = 1; y < height - 1; y++)
-            {
-                if (mapCopy[x, y] == 1) // If this is a floor
-                {
-                    // Count adjacent floor tiles
-                    int adjacentFloors = 0;
-                    for (int dx = -1; dx <= 1; dx++)
-                    {
-                        for (int dy = -1; dy <= 1; dy++)
-                        {
-                            if (dx == 0 && dy == 0) continue;
-                            
-                            if (mapCopy[x + dx, y + dy] == 1)
-                            {
-                                adjacentFloors++;
-                            }
-                        }
-                    }
-                    
-                    // If this has few adjacent floors, it might be a narrow corridor
-                    // Let's expand it a bit by making adjacent walls into floors
-                    if (adjacentFloors <= 3)
-                    {
-                        // Add an extra floor adjacent to this one
-                        for (int dx = -1; dx <= 1; dx++)
-                        {
-                            for (int dy = -1; dy <= 1; dy++)
-                            {
-                                if (dx == 0 && dy == 0) continue;
-                                
-                                int nx = x + dx;
-                                int ny = y + dy;
-                                
-                                if (nx > 0 && nx < width - 1 && ny > 0 && ny < height - 1)
-                                {
-                                    // Convert this wall to a floor with a random chance
-                                    if (mapCopy[nx, ny] == 0 && Random.value < 0.5f)
-                                    {
-                                        map[nx, ny] = 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    void AddExtraCorridors()
-    {
-        // Add some random corridors for more exploration options
-        int extraPaths = width / 4; // Increased extra paths
-        
-        for (int i = 0; i < extraPaths; i++)
-        {
-            // Find two random floor tiles
-            List<Vector2Int> floorTiles = GetFloorTiles();
-            
-            if (floorTiles.Count >= 2)
-            {
-                int idxA = Random.Range(0, floorTiles.Count);
-                int idxB = Random.Range(0, floorTiles.Count);
-                
-                if (idxA != idxB && Vector2Int.Distance(floorTiles[idxA], floorTiles[idxB]) > 8)
-                {
-                    Vector2 startPos = floorTiles[idxA];
-                    Vector2 endPos = floorTiles[idxB];
-                    CreateCorridor(startPos, endPos);
-                }
-            }
-        }
-    }
-
-    List<Vector2Int> GetFloorTiles()
-    {
-        List<Vector2Int> floorTiles = new List<Vector2Int>();
-        
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                if (map[x, y] == 1)
-                {
-                    floorTiles.Add(new Vector2Int(x, y));
-                }
-            }
-        }
-        
-        return floorTiles;
-    }
-
-    void PlaceExitAtEnd()
-    {
-        // Find a floor tile that is at the "end" of a path
-        if (rooms.Count == 0) return;
-        
-        // First, identify potential "end" tiles - floor tiles with only 1-2 adjacent floors
-        List<Vector2Int> endTiles = new List<Vector2Int>();
-        List<float> distancesFromStart = new List<float>();
-        
-        // Get a starting point (we'll use the center of the first room)
-        Vector2 startPoint = GetRoomCenter(rooms[0]);
-        
-        // Find floor tiles that have few adjacent floors (dead ends or near dead ends)
-        for (int x = 1; x < width - 1; x++)
-        {
-            for (int y = 1; y < height - 1; y++)
-            {
-                if (map[x, y] == 1) // If this is a floor
-                {
-                    // Count adjacent floor tiles
-                    int adjacentFloors = 0;
-                    for (int dx = -1; dx <= 1; dx++)
-                    {
-                        for (int dy = -1; dy <= 1; dy++)
-                        {
-                            if (dx == 0 && dy == 0) continue;
-                            
-                            int nx = x + dx;
-                            int ny = y + dy;
-                            
-                            if (nx >= 0 && nx < width && ny >= 0 && ny < height && map[nx, ny] == 1)
-                            {
-                                adjacentFloors++;
-                            }
-                        }
-                    }
-                    
-                    // If this tile has 1-2 adjacent floors, it's a possible end
-                    if (adjacentFloors <= 2)
-                    {
-                        Vector2Int pos = new Vector2Int(x, y);
-                        endTiles.Add(pos);
-                        
-                        // Calculate distance from start
-                        float dist = Vector2.Distance(startPoint, pos);
-                        distancesFromStart.Add(dist);
-                    }
-                }
-            }
-        }
-        
-        // If we found possible end tiles, choose the one furthest from start
-        if (endTiles.Count > 0)
-        {
-            // Find the furthest tile
-            int furthestIndex = 0;
-            float maxDistance = 0;
-            
-            for (int i = 0; i < distancesFromStart.Count; i++)
-            {
-                if (distancesFromStart[i] > maxDistance)
-                {
-                    maxDistance = distancesFromStart[i];
-                    furthestIndex = i;
-                }
-            }
-            
-            // Check if this tile is inside a room
-            Vector2Int exitPos = endTiles[furthestIndex];
-            bool isInRoom = false;
-            
-            foreach (Rect room in rooms)
-            {
-                if (exitPos.x > room.x && exitPos.x < room.x + room.width - 1 &&
-                    exitPos.y > room.y && exitPos.y < room.y + room.height - 1)
-                {
-                    isInRoom = true;
-                    break;
-                }
-            }
-            
-            // If it's in a room, try to find a non-room end tile
-            if (isInRoom && endTiles.Count > 1)
-            {
-                // Sort by distance (descending)
-                for (int i = 0; i < endTiles.Count - 1; i++)
-                {
-                    for (int j = i + 1; j < endTiles.Count; j++)
-                    {
-                        if (distancesFromStart[j] > distancesFromStart[i])
-                        {
-                            // Swap distances
-                            float tempDist = distancesFromStart[i];
-                            distancesFromStart[i] = distancesFromStart[j];
-                            distancesFromStart[j] = tempDist;
-                            
-                            // Swap tiles
-                            Vector2Int tempTile = endTiles[i];
-                            endTiles[i] = endTiles[j];
-                            endTiles[j] = tempTile;
-                        }
-                    }
-                }
-                
-                // Try to find the first non-room end tile
-                for (int i = 0; i < endTiles.Count; i++)
-                {
-                    exitPos = endTiles[i];
-                    isInRoom = false;
-                    
-                    foreach (Rect room in rooms)
-                    {
-                        if (exitPos.x > room.x && exitPos.x < room.x + room.width - 1 &&
-                            exitPos.y > room.y && exitPos.y < room.y + room.height - 1)
-                        {
-                            isInRoom = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!isInRoom)
-                    {
-                        break; // Found a suitable non-room end tile
-                    }
-                }
-            }
-            
-            // Place the exit
-            map[exitPos.x, exitPos.y] = 2; // Mark as exit
-        }
-        else
-        {
-            // Fallback: if no suitable end tiles, just place the exit at the furthest floor tile
-            float maxDistance = 0;
-            Vector2Int exitPos = Vector2Int.zero;
-            
-            List<Vector2Int> floorTiles = GetFloorTiles();
-            
-            foreach (Vector2Int pos in floorTiles)
-            {
-                float dist = Vector2.Distance(startPoint, pos);
-                if (dist > maxDistance)
-                {
-                    maxDistance = dist;
-                    exitPos = pos;
-                }
-            }
-            
-            if (maxDistance > 0)
-            {
-                map[exitPos.x, exitPos.y] = 2; // Exit
+                CreateHorizontalCorridor(currentRoom.x, nextRoom.x, currentRoom.y);
+                CreateVerticalCorridor(currentRoom.y, nextRoom.y, nextRoom.x);
             }
             else
             {
-                // Last resort fallback
-                if (floorTiles.Count > 0)
+                CreateVerticalCorridor(currentRoom.y, nextRoom.y, currentRoom.x);
+                CreateHorizontalCorridor(currentRoom.x, nextRoom.x, nextRoom.y);
+            }
+        }
+    }
+
+    private void CreateHorizontalCorridor(int startX, int endX, int y)
+    {
+        int corridorWidth = Random.Range(2, 5); // Corridor width between 2-4 cells
+        int minX = Mathf.Min(startX, endX);
+        int maxX = Mathf.Max(startX, endX);
+
+        for (int x = minX; x <= maxX; x++)
+        {
+            for (int i = 0; i < corridorWidth; i++)
+            {
+                int yPos = y - corridorWidth / 2 + i;
+
+                if (IsInBounds(x, yPos) && dungeonGrid[x, yPos] == CellType.Empty)
                 {
-                    Vector2Int randomPos = floorTiles[Random.Range(0, floorTiles.Count)];
-                    map[randomPos.x, randomPos.y] = 2; // Exit
+                    dungeonGrid[x, yPos] = CellType.Floor;
+                    corridors.Add(new Vector2Int(x, yPos));
                 }
             }
         }
     }
 
-    void PlaceRocks()
+    private void CreateVerticalCorridor(int startY, int endY, int x)
     {
-        // Get all floor tiles
-        List<Vector2Int> floorTiles = GetFloorTiles();
-        
-        // Randomly place rocks on floor tiles based on rock density
-        foreach (Vector2Int floorPos in floorTiles)
+        int corridorWidth = Random.Range(2, 5); // Corridor width between 2-4 cells
+        int minY = Mathf.Min(startY, endY);
+        int maxY = Mathf.Max(startY, endY);
+
+        for (int y = minY; y <= maxY; y++)
         {
-            // Skip tiles where the exit is
-            if (map[floorPos.x, floorPos.y] == 2) continue;
-            
-            // Random chance to place a rock based on density
-            if (Random.Range(0, 100) < rockDensity)
+            for (int i = 0; i < corridorWidth; i++)
             {
-                // Check to ensure we don't block any paths
-                if (IsValidRockPosition(floorPos))
+                int xPos = x - corridorWidth / 2 + i;
+
+                if (IsInBounds(xPos, y) && dungeonGrid[xPos, y] == CellType.Empty)
                 {
-                    rockPositions.Add(floorPos); // Store the rock position separately
-                    // The map array still shows this as a floor (1), since rocks are "on top" of floors
+                    dungeonGrid[xPos, y] = CellType.Floor;
+                    corridors.Add(new Vector2Int(xPos, y));
                 }
             }
         }
-        
-        // Make sure we don't have too many rocks in a single room
-        foreach (Rect room in rooms)
+    }
+
+    private void AddDeadEnds()
+    {
+        int deadEndsToAdd = Mathf.Max(1, deadEndCount); // Ensure at least one dead end
+        int attemptsPerDeadEnd = 50; // Max attempts per dead end to avoid infinite loops
+
+        for (int i = 0; i < deadEndsToAdd; i++)
         {
-            int rocksInRoom = 0;
-            List<Vector2Int> roomRocks = new List<Vector2Int>();
-            
-            // Count rocks in this room
-            foreach (Vector2Int rockPos in rockPositions)
+            CreateDeadEndCorridor();
+        }
+    }
+
+    private void CreateDeadEndCorridor()
+    {
+        // Find a random floor tile to start from - preferring corridor tiles
+        List<Vector2Int> possibleStartPoints = new List<Vector2Int>();
+
+        // First try to use corridor tiles
+        foreach (Vector2Int corridor in corridors)
+        {
+            if (IsGoodDeadEndStart(corridor))
             {
-                if (rockPos.x >= room.x && rockPos.x < room.x + room.width &&
-                    rockPos.y >= room.y && rockPos.y < room.y + room.height)
+                possibleStartPoints.Add(corridor);
+            }
+        }
+
+        // If no good corridor cells, look at any floor tile
+        if (possibleStartPoints.Count == 0)
+        {
+            for (int x = 0; x < dungeonWidth; x++)
+            {
+                for (int y = 0; y < dungeonHeight; y++)
                 {
-                    rocksInRoom++;
-                    roomRocks.Add(rockPos);
+                    if (dungeonGrid[x, y] == CellType.Floor && IsGoodDeadEndStart(new Vector2Int(x, y)))
+                    {
+                        possibleStartPoints.Add(new Vector2Int(x, y));
+                    }
                 }
             }
-            
-            // If too many rocks, remove some
-            int maxRocksPerRoom = Mathf.Max(1, (int)(room.width * room.height * 0.08f)); // 8% of room area
-            if (rocksInRoom > maxRocksPerRoom)
+        }
+
+        // If no start points found, we can't create a dead end
+        if (possibleStartPoints.Count == 0)
+        {
+            return;
+        }
+
+        // Choose a random start point
+        Vector2Int startPoint = possibleStartPoints[Random.Range(0, possibleStartPoints.Count)];
+
+        // Find valid directions (toward empty space)
+        List<Vector2Int> validDirections = new List<Vector2Int>();
+        Vector2Int[] directions = new Vector2Int[]
+            { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+
+        foreach (Vector2Int dir in directions)
+        {
+            if (CanGrowDeadEndInDirection(startPoint, dir))
             {
-                // Shuffle the list of rocks
-                for (int i = 0; i < roomRocks.Count; i++)
+                validDirections.Add(dir);
+            }
+        }
+
+        if (validDirections.Count == 0)
+        {
+            return; // No valid direction to grow
+        }
+
+        // Choose a random direction and create the dead end
+        Vector2Int direction = validDirections[Random.Range(0, validDirections.Count)];
+
+        // Create a dead end corridor with random length between 8-12 cells
+        int corridorLength = Random.Range(8, 13);
+        int corridorWidth = Random.Range(2, 4); // Width between 2-3 cells
+
+        List<Vector2Int> deadEndCells = new List<Vector2Int>();
+        bool success = false;
+
+        // Try to create the dead end
+        for (int dist = 1; dist <= corridorLength; dist++)
+        {
+            List<Vector2Int> cellsAtCurrentDistance = new List<Vector2Int>();
+
+            // The main line in the direction
+            Vector2Int basePos = startPoint + (direction * dist);
+
+            if (!IsInBounds(basePos.x, basePos.y))
+            {
+                break; // Out of bounds, stop growing
+            }
+
+            // For width, add cells perpendicular to main direction
+            Vector2Int perpendicular;
+
+            if (direction.x != 0) // Horizontal corridor
+            {
+                perpendicular = new Vector2Int(0, 1);
+            }
+            else // Vertical corridor
+            {
+                perpendicular = new Vector2Int(1, 0);
+            }
+
+            bool canContinue = true;
+
+            // Place the corridor cells for current distance
+            for (int w = -corridorWidth / 2; w <= corridorWidth / 2; w++)
+            {
+                Vector2Int currentPos = basePos + (perpendicular * w);
+
+                if (!IsInBounds(currentPos.x, currentPos.y))
                 {
-                    int swapIndex = Random.Range(i, roomRocks.Count);
-                    Vector2Int temp = roomRocks[i];
-                    roomRocks[i] = roomRocks[swapIndex];
-                    roomRocks[swapIndex] = temp;
+                    continue; // Skip this position if out of bounds
                 }
-                
-                // Remove excess rocks
-                for (int i = 0; i < rocksInRoom - maxRocksPerRoom; i++)
+
+                // If we would hit a floor cell that's not at the start, cancel
+                if (dist > 1 && dungeonGrid[currentPos.x, currentPos.y] == CellType.Floor)
                 {
-                    if (i < roomRocks.Count)
+                    canContinue = false;
+                    break;
+                }
+
+                // Otherwise, mark this as a position we want to add
+                cellsAtCurrentDistance.Add(currentPos);
+            }
+
+            // If we can't continue, stop the corridor growth
+            if (!canContinue)
+            {
+                break;
+            }
+
+            // Add all cells at this distance to our dead end
+            foreach (Vector2Int cell in cellsAtCurrentDistance)
+            {
+                deadEndCells.Add(cell);
+            }
+
+            // If we've reached our desired length, mark as success
+            if (dist == corridorLength)
+            {
+                success = true;
+            }
+        }
+
+        // Only set cells if we created a valid dead end
+        if (deadEndCells.Count > 2)
+        {
+            deadEnds.Add(deadEndCells);
+
+            foreach (Vector2Int cell in deadEndCells)
+            {
+                dungeonGrid[cell.x, cell.y] = CellType.DeadEnd; // Mark as dead end (will be rendered as floor)
+            }
+        }
+    }
+
+    // Check if a position is a good starting point for a dead end
+    private bool IsGoodDeadEndStart(Vector2Int pos)
+    {
+        // Must be a floor tile
+        if (dungeonGrid[pos.x, pos.y] != CellType.Floor)
+        {
+            return false;
+        }
+
+        // Check if it has at least one direction with empty space
+        bool hasEmptyDirection = false;
+        Vector2Int[] directions = new Vector2Int[]
+            { Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left };
+
+        foreach (Vector2Int dir in directions)
+        {
+            if (CanGrowDeadEndInDirection(pos, dir))
+            {
+                hasEmptyDirection = true;
+                break;
+            }
+        }
+
+        return hasEmptyDirection;
+    }
+
+    // Check if we can grow a dead end from pos in direction dir
+    private bool CanGrowDeadEndInDirection(Vector2Int pos, Vector2Int dir)
+    {
+        // Check if the adjacent cell in this direction is empty
+        Vector2Int nextPos = pos + dir;
+
+        if (!IsInBounds(nextPos.x, nextPos.y) || dungeonGrid[nextPos.x, nextPos.y] != CellType.Empty)
+        {
+            return false;
+        }
+
+        // Check if we have space to grow the corridor a few cells in this direction
+        int minGrowth = 5; // Require at least 5 cells of growth space
+
+        for (int dist = 1; dist <= minGrowth; dist++)
+        {
+            Vector2Int checkPos = pos + (dir * dist);
+
+            if (!IsInBounds(checkPos.x, checkPos.y))
+            {
+                return false; // Not enough room to grow
+            }
+
+            // The main corridor path needs to be empty
+            if (dungeonGrid[checkPos.x, checkPos.y] != CellType.Empty)
+            {
+                return false;
+            }
+
+            // Also check width space (1 tile on each side for corridor width)
+            Vector2Int perpendicular = (dir.x != 0) ? new Vector2Int(0, 1) : new Vector2Int(1, 0);
+
+            for (int w = -1; w <= 1; w++)
+            {
+                if (w == 0) continue; // Already checked the main position
+
+                Vector2Int widthPos = checkPos + (perpendicular * w);
+
+                if (!IsInBounds(widthPos.x, widthPos.y))
+                {
+                    continue; // Edge of map is fine
+                }
+
+                // If there's a floor tile along the width, that's not good
+                if (dungeonGrid[widthPos.x, widthPos.y] == CellType.Floor)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true; // Enough space to grow in this direction
+    }
+
+    private void VisualizeDeadEnds()
+    {
+        foreach (List<Vector2Int> deadEnd in deadEnds)
+        {
+            foreach (Vector2Int cell in deadEnd)
+            {
+                // Visual debugging in the scene view
+                Debug.DrawLine(
+                    new Vector3(cell.x, cell.y, 0),
+                    new Vector3(cell.x + 1, cell.y + 1, 0),
+                    deadEndColor,
+                    100f
+                );
+                Debug.DrawLine(
+                    new Vector3(cell.x + 1, cell.y, 0),
+                    new Vector3(cell.x, cell.y + 1, 0),
+                    deadEndColor,
+                    100f
+                );
+            }
+        }
+    }
+
+    private void PlaceSpawnAndExit()
+    {
+        // Find possible spawn points (in corridors, not in rooms)
+        List<Vector2Int> possibleSpawnPoints = new List<Vector2Int>();
+
+        foreach (Vector2Int corridorCell in corridors)
+        {
+            if (!IsInAnyRoom(corridorCell))
+            {
+                possibleSpawnPoints.Add(corridorCell);
+            }
+        }
+
+        // Place spawn point
+        if (possibleSpawnPoints.Count > 0)
+        {
+            int spawnIndex = Random.Range(0, possibleSpawnPoints.Count);
+            spawnPosition = possibleSpawnPoints[spawnIndex];
+            dungeonGrid[spawnPosition.x, spawnPosition.y] = CellType.Spawn;
+
+            // Find the farthest point from spawn for exit
+            Vector2Int farthestPoint = FindFarthestPoint(spawnPosition);
+            exitPosition = farthestPoint;
+            dungeonGrid[exitPosition.x, exitPosition.y] = CellType.Exit;
+        }
+        else
+        {
+            // Fallback: place spawn and exit in opposite corners of the dungeon
+            spawnPosition = new Vector2Int(5, 5);
+            exitPosition = new Vector2Int(dungeonWidth - 5, dungeonHeight - 5);
+
+            // Make sure these positions are floor tiles
+            if (IsInBounds(spawnPosition.x, spawnPosition.y))
+            {
+                dungeonGrid[spawnPosition.x, spawnPosition.y] = CellType.Spawn;
+            }
+
+            if (IsInBounds(exitPosition.x, exitPosition.y))
+            {
+                dungeonGrid[exitPosition.x, exitPosition.y] = CellType.Exit;
+            }
+        }
+    }
+
+    private Vector2Int FindFarthestPoint(Vector2Int from)
+    {
+        Vector2Int farthestPoint = from;
+        int maxDistance = 0;
+
+        // Check all floor tiles
+        for (int x = 0; x < dungeonWidth; x++)
+        {
+            for (int y = 0; y < dungeonHeight; y++)
+            {
+                if (dungeonGrid[x, y] == CellType.Floor || dungeonGrid[x, y] == CellType.DeadEnd)
+                {
+                    Vector2Int point = new Vector2Int(x, y);
+                    int distance = Mathf.Abs(point.x - from.x) + Mathf.Abs(point.y - from.y);
+
+                    if (distance > maxDistance)
                     {
-                        rockPositions.Remove(roomRocks[i]);
+                        maxDistance = distance;
+                        farthestPoint = point;
+                    }
+                }
+            }
+        }
+
+        return farthestPoint;
+    }
+
+    private void PlaceRocks()
+    {
+        int rocksToPlace = Random.Range(3, rockCount + 1);
+        int rockPlaced = 0;
+
+        while (rockPlaced < rocksToPlace && rockPlaced < 50) // Avoid infinite loops
+        {
+            int x = Random.Range(0, dungeonWidth);
+            int y = Random.Range(0, dungeonHeight);
+
+            if (dungeonGrid[x, y] == CellType.Floor)
+            {
+                // Make sure there are no rocks adjacent
+                bool hasAdjacentRock = false;
+
+                for (int nx = x - 1; nx <= x + 1; nx++)
+                {
+                    for (int ny = y - 1; ny <= y + 1; ny++)
+                    {
+                        if (IsInBounds(nx, ny) && dungeonGrid[nx, ny] == CellType.Rock)
+                        {
+                            hasAdjacentRock = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Check if there are at least 2 adjacent floor tiles
+                int adjacentFloorCount = 0;
+                for (int nx = x - 1; nx <= x + 1; nx++)
+                {
+                    for (int ny = y - 1; ny <= y + 1; ny++)
+                    {
+                        if ((nx != x || ny != y) && IsInBounds(nx, ny) &&
+                            (dungeonGrid[nx, ny] == CellType.Floor || dungeonGrid[nx, ny] == CellType.DeadEnd))
+                        {
+                            adjacentFloorCount++;
+                        }
+                    }
+                }
+
+                if (!hasAdjacentRock && adjacentFloorCount >= 2)
+                {
+                    dungeonGrid[x, y] = CellType.Rock;
+                    rockPlaced++;
+                }
+            }
+        }
+    }
+
+    private void PlaceChests()
+    {
+        int chestsToPlace = Random.Range(0, chestCount + 1);
+        int chestsPlaced = 0;
+
+        // Try to place some chests at the end of dead-end corridors
+        foreach (List<Vector2Int> deadEnd in deadEnds)
+        {
+            if (chestsPlaced >= chestsToPlace) break;
+
+            // Get the last cell of the dead end
+            if (deadEnd.Count > 0)
+            {
+                Vector2Int cell = deadEnd[deadEnd.Count - 1];
+                dungeonGrid[cell.x, cell.y] = CellType.Chest;
+                chestsPlaced++;
+            }
+        }
+
+        // Place remaining chests randomly
+        while (chestsPlaced < chestsToPlace && chestsPlaced < 50) // Avoid infinite loops
+        {
+            int x = Random.Range(0, dungeonWidth);
+            int y = Random.Range(0, dungeonHeight);
+
+            if (dungeonGrid[x, y] == CellType.Floor || dungeonGrid[x, y] == CellType.DeadEnd)
+            {
+                // Check if there are at least 2 adjacent floor tiles
+                int adjacentFloorCount = 0;
+                for (int nx = x - 1; nx <= x + 1; nx++)
+                {
+                    for (int ny = y - 1; ny <= y + 1; ny++)
+                    {
+                        if ((nx != x || ny != y) && IsInBounds(nx, ny) &&
+                            (dungeonGrid[nx, ny] == CellType.Floor || dungeonGrid[nx, ny] == CellType.DeadEnd))
+                        {
+                            adjacentFloorCount++;
+                        }
+                    }
+                }
+
+                if (adjacentFloorCount >= 2)
+                {
+                    dungeonGrid[x, y] = CellType.Chest;
+                    chestsPlaced++;
+                }
+            }
+        }
+    }
+
+    private void CreateWalls()
+    {
+        CellType[,] tempGrid = new CellType[dungeonWidth, dungeonHeight];
+
+        // Copy current grid
+        for (int x = 0; x < dungeonWidth; x++)
+        {
+            for (int y = 0; y < dungeonHeight; y++)
+            {
+                tempGrid[x, y] = dungeonGrid[x, y];
+            }
+        }
+
+        // Add walls around floor tiles
+        for (int x = 0; x < dungeonWidth; x++)
+        {
+            for (int y = 0; y < dungeonHeight; y++)
+            {
+                if (dungeonGrid[x, y] == CellType.Empty)
+                {
+                    // Check if any neighbor is a floor or special tile
+                    for (int nx = x - 1; nx <= x + 1; nx++)
+                    {
+                        for (int ny = y - 1; ny <= y + 1; ny++)
+                        {
+                            if (IsInBounds(nx, ny) && IsFloorLikeCell(nx, ny))
+                            {
+                                tempGrid[x, y] = CellType.Wall;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update grid
+        dungeonGrid = tempGrid;
+    }
+
+    // Ensure all floor tiles that are at the edge of the dungeon have wall tiles around them
+    private void EnsureWallBorders()
+    {
+        // First pass: find floor tiles that are at the edge
+        List<Vector2Int> edgeFloors = new List<Vector2Int>();
+
+        for (int x = 0; x < dungeonWidth; x++)
+        {
+            for (int y = 0; y < dungeonHeight; y++)
+            {
+                if (IsFloorLikeCell(x, y))
+                {
+                    // Check if this floor is at the edge (adjacent to out of bounds)
+                    if (x == 0 || y == 0 || x == dungeonWidth - 1 || y == dungeonHeight - 1)
+                    {
+                        edgeFloors.Add(new Vector2Int(x, y));
+                    }
+                    else
+                    {
+                        // Check in the four cardinal directions
+                        Vector2Int[] directions = new Vector2Int[]
+                        {
+                            Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left
+                        };
+
+                        foreach (Vector2Int dir in directions)
+                        {
+                            Vector2Int checkPos = new Vector2Int(x, y) + dir;
+
+                            if (!IsInBounds(checkPos.x, checkPos.y) ||
+                                (dungeonGrid[checkPos.x, checkPos.y] == CellType.Empty &&
+                                 !HasWallAdjacent(checkPos.x, checkPos.y)))
+                            {
+                                edgeFloors.Add(new Vector2Int(x, y));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second pass: create walls around edge floors
+        foreach (Vector2Int edgeFloor in edgeFloors)
+        {
+            // Check in all 8 directions
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    if (dx == 0 && dy == 0) continue; // Skip the cell itself
+
+                    int nx = edgeFloor.x + dx;
+                    int ny = edgeFloor.y + dy;
+
+                    // If out of bounds or empty, make sure there's a wall wherever possible
+                    if (!IsInBounds(nx, ny))
+                    {
+                        // If at edge, can't place a wall outside the grid
+                        continue;
+                    }
+
+                    if (dungeonGrid[nx, ny] == CellType.Empty)
+                    {
+                        dungeonGrid[nx, ny] = CellType.Wall;
                     }
                 }
             }
         }
     }
 
-    bool IsValidRockPosition(Vector2Int pos)
+    private bool HasWallAdjacent(int x, int y)
     {
-        // Make sure placing a rock here doesn't completely block a path
-        
-        int adjacentFloors = 0;
-        bool isInCorridor = true;
-        
-        // Check if this is in a room (less strict rules for rooms)
-        foreach (Rect room in rooms)
+        for (int nx = x - 1; nx <= x + 1; nx++)
         {
-            if (pos.x > room.x && pos.x < room.x + room.width - 1 &&
-                pos.y > room.y && pos.y < room.y + room.height - 1)
+            for (int ny = y - 1; ny <= y + 1; ny++)
             {
-                isInCorridor = false;
-                break;
-            }
-        }
-        
-        // Count adjacent floor tiles
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dy = -1; dy <= 1; dy++)
-            {
-                if (dx == 0 && dy == 0) continue; // Skip the center position
-                
-                int nx = pos.x + dx;
-                int ny = pos.y + dy;
-                
-                if (nx >= 0 && nx < width && ny >= 0 && ny < height && map[nx, ny] == 1)
+                if ((nx != x || ny != y) && IsInBounds(nx, ny) && dungeonGrid[nx, ny] == CellType.Wall)
                 {
-                    adjacentFloors++;
+                    return true;
                 }
             }
         }
-        
-        // In corridors we need to be more careful about placement
-        if (isInCorridor)
+
+        return false;
+    }
+
+    private bool IsFloorLikeCell(int x, int y)
+    {
+        return dungeonGrid[x, y] == CellType.Floor ||
+               dungeonGrid[x, y] == CellType.DeadEnd ||
+               dungeonGrid[x, y] == CellType.Spawn ||
+               dungeonGrid[x, y] == CellType.Exit ||
+               dungeonGrid[x, y] == CellType.Chest;
+    }
+
+    private void RenderDungeon()
+    {
+        for (int x = 0; x < dungeonWidth; x++)
         {
-            // Ensure at least 3 adjacent floors in corridors (don't block the path)
-            return adjacentFloors >= 3;
-        }
-        else
-        {
-            // In rooms, just make sure there are at least 2 adjacent floors
-            return adjacentFloors >= 2;
+            for (int y = 0; y < dungeonHeight; y++)
+            {
+                Vector3Int position = new Vector3Int(x, y, 0);
+
+                switch (dungeonGrid[x, y])
+                {
+                    case CellType.Floor:
+                    case CellType.DeadEnd: // Dead ends use floor tiles too
+                        tilemap.SetTile(position, floorTile);
+                        break;
+
+                    case CellType.Wall:
+                        tilemap.SetTile(position, wallTile);
+                        break;
+
+                    case CellType.Spawn:
+                        tilemap.SetTile(position, spawnTile);
+                        break;
+
+                    case CellType.Exit:
+                        tilemap.SetTile(position, exitTile);
+                        break;
+
+                    case CellType.Rock:
+                        tilemap.SetTile(position, rockTile);
+                        break;
+
+                    case CellType.Chest:
+                        tilemap.SetTile(position, chestTile);
+                        break;
+                }
+            }
         }
     }
 
-    void RenderMap()
+    // Utility functions
+    private bool IsInBounds(int x, int y)
     {
-        tilemap.ClearAllTiles();
-        
-        // First, render all the basic tiles (floor, walls)
-        for (int x = 0; x < width; x++)
+        return x >= 0 && x < dungeonWidth && y >= 0 && y < dungeonHeight;
+    }
+
+    private bool IsInAnyRoom(Vector2Int position)
+    {
+        foreach (Rect room in rooms)
         {
-            for (int y = 0; y < height; y++)
+            if (position.x >= room.x && position.x < room.x + room.width &&
+                position.y >= room.y && position.y < room.y + room.height)
             {
-                Vector3Int pos = new Vector3Int(x, y, 0);
-                
-                switch (map[x, y])
-                {
-                    case 0: // Wall
-                        tilemap.SetTile(pos, wallTile);
-                        break;
-                    case 1: // Floor
-                    case 2: // Exit is on a floor
-                        tilemap.SetTile(pos, floorTile);
-                        break;
-                }
+                return true;
             }
         }
-        
-        // Then render objects on top (exit, rocks)
-        // First the exit
-        for (int x = 0; x < width; x++)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                if (map[x, y] == 2) // Exit
-                {
-                    Vector3Int pos = new Vector3Int(x, y, 0);
-                    // Using SetTile will replace the floor with the exit
-                    // Instead, we can combine tiles if your tilemap supports it
-                    // Or just assume the exit tile has transparent parts showing floor underneath
-                    tilemap.SetTile(pos, exitTile);
-                }
-            }
-        }
-        
-        // Then render rocks
-        foreach (Vector2Int rockPos in rockPositions)
-        {
-            Vector3Int pos = new Vector3Int(rockPos.x, rockPos.y, 0);
-            
-            // Assuming rock tiles have transparent backgrounds
-            tilemap.SetTile(pos, rockTile);
-        }
+
+        return false;
     }
 }
